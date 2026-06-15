@@ -658,38 +658,63 @@ def recommend_by_review(user_input, gender, age, skin_type):
     return jsonify({'mode': 'review', 'results': results})
 
 
-def find_related_products(user_input, recommended_ingredients):
+def find_related_products(user_input, recommended_ingredients, response_text=''):
     if df_product_list is None:
         return []
-    terms = []
-    for text in (user_input, str(recommended_ingredients)):
-        if text and text != 'nan':
-            terms.extend(okt.nouns(text))
-    terms = [
-        term for term in dict.fromkeys(terms)
-        if len(term) >= 2 and term not in {'피부', '추출물', '사용', '도움', '성분'}
-    ]
 
-    results = []
-    seen_links = set()
-    for term in terms[:6]:
-        matches = df_product_list[
-            df_product_list['product_name'].str.contains(term, case=False, na=False)
-            | df_product_list['product_brand'].str.contains(term, case=False, na=False)
+    STOPWORDS = {'피부', '추출물', '사용', '도움', '성분', '제품', '바르', '얇게', '발라', '선택', '타입', '방법', '경우', '이후', '이전', '해야', '있어', '없어'}
+
+    def extract_ing_terms(ing_text):
+        import re
+        raw = str(ing_text)
+        if not raw or raw == 'nan':
+            return []
+        out = []
+        for part in raw.split(','):
+            sub = re.split(r'[\(\)\[\]/]', part)
+            out.extend(s.strip() for s in sub if len(s.strip()) >= 2)
+        return out
+
+    def search(terms, limit=6):
+        results, seen_links = [], set()
+        for term in terms[:limit]:
+            matches = df_product_list[
+                df_product_list['product_name'].str.contains(term, case=False, na=False, regex=False)
+                | df_product_list['product_brand'].str.contains(term, case=False, na=False, regex=False)
+            ]
+            for _, product in matches.head(2).iterrows():
+                product_url = safe_product_url(product['product_link'])
+                if not product_url or product_url in seen_links:
+                    continue
+                results.append({
+                    'brand': str(product['product_brand']),
+                    'name': str(product['product_name']),
+                    'category': str(product['category']),
+                    'link': product_url,
+                })
+                seen_links.add(product_url)
+                if len(results) == 6:
+                    return results
+        return results
+
+    # 1차: user_input 명사 + 성분명 직접 검색
+    terms = []
+    if user_input:
+        terms.extend(okt.nouns(user_input))
+    terms.extend(extract_ing_terms(recommended_ingredients))
+    terms = [t for t in dict.fromkeys(terms) if len(t) >= 2 and t not in STOPWORDS]
+    results = search(terms)
+    if results:
+        return results
+
+    # 2차 폴백: Makeup Response 명사로 검색
+    if response_text:
+        fallback_terms = [
+            w for w in okt.nouns(response_text)
+            if len(w) >= 2 and w not in STOPWORDS
         ]
-        for _, product in matches.head(2).iterrows():
-            product_url = safe_product_url(product['product_link'])
-            if not product_url or product_url in seen_links:
-                continue
-            results.append({
-                'brand': str(product['product_brand']),
-                'name': str(product['product_name']),
-                'category': str(product['category']),
-                'link': product_url,
-            })
-            seen_links.add(product_url)
-            if len(results) == 6:
-                return results
+        results = search(fallback_terms, limit=10)
+
     return results
 
 
@@ -747,6 +772,7 @@ def build_response(row, user_input, gender, age, skin_type, cleaned=''):
         ),
         'product_recommendations': find_related_products(
             user_input, row['Recommended Ingredients'],
+            response_text=str(row['Makeup Response']),
         ),
     })
 
